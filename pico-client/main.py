@@ -1,24 +1,32 @@
-from machine import Pin, I2C
-from typing import Literal, Optional
+# Import all board pins.
+import board
+import busio
+
+# Import the SSD1306 module.
+import adafruit_ssd1306
+
+
 import time
 
-import ssd1306
 
 # using default address 0x3C
 
-i2c = I2C(id=0, sda=Pin(20), scl=Pin(21))
+# i2c = I2C(id=0, sda=Pin(20), scl=Pin(21))
 
+# Create the I2C interface.
+i2c = busio.I2C(sda=board.GP20, scl=board.GP21)
 display_w = 128
 display_h = 32
-display = ssd1306.SSD1306_I2C(display_w, display_h, i2c)
+# display = ssd1306.SSD1306_I2C(display_w, display_h, i2c)
+display = adafruit_ssd1306.SSD1306_I2C(display_w, display_h, i2c)
 row_height = 8
 
 
-class InfoCell:
+class InfoTxtCell:
     def __init__(
         self,
-        value: Optional[str | int] = None,
-        unit: Optional[str] = None,
+        value: str = None,
+        unit: str = None,
         size: int = 4,
     ):
         if isinstance(value, int):
@@ -50,21 +58,23 @@ class InfoCell:
         return output
 
 
-class InfoRow:
-    def __init__(self, title: str, row: Literal[0, 1, 2, 3]):
+class InfoTxtRow:
+    def __init__(self, title: str, row: int):
+        if row not in [0, 1, 2, 3]:
+            raise ValueError(f"Only row 0-3 are supported. input: {row}")
         if len(title) > 3:
             raise ValueError("Title length max is 3 chars. got {}".format(len(title)))
         self.title = title
         self.row = row
         self._x_bottom = self.row * 8
-        self.cell_1: InfoCell = InfoCell()
-        self.cell_2: InfoCell = InfoCell()
+        self.cell_1: InfoTxtCell = InfoTxtCell()
+        self.cell_2: InfoTxtCell = InfoTxtCell()
         self.warn_enabled: bool = False
 
-    def write_cell_1(self, c: InfoCell):
+    def write_cell_1(self, c: InfoTxtCell):
         self.cell_1 = c
 
-    def write_cell_2(self, c: InfoCell):
+    def write_cell_2(self, c: InfoTxtCell):
         self.cell_2 = c
 
     def warn(self, on: bool = True):
@@ -106,30 +116,40 @@ class InfoRow:
             self.draw_warn()
 
 
-cpu = InfoRow("CPU", 0)
-gpu = InfoRow("GPU", 1)
-mem = InfoRow("MEM", 2)
-hdd = InfoRow("HDD", 3)
+class InfoGraphRow:
+    pass
 
-cpu.write_cell_1(InfoCell(100, "C"))
-cpu.write_cell_2(InfoCell(100, "%"))
 
-gpu.write_cell_1(InfoCell(1, "C"))
-gpu.write_cell_2(InfoCell(98, "%"))
+class InfoScreen:
+    def __init__(self, display: ssd1306.SSD1306_I2C):
+        pass
 
-mem.write_cell_1(InfoCell(6, "C"))
-mem.write_cell_2(InfoCell(1000, "%"))
 
-hdd.write_cell_1(InfoCell(1000, "MB/s", 8))
+def test():
+    cpu = InfoTxtRow("CPU", 0)
+    gpu = InfoTxtRow("GPU", 1)
+    mem = InfoTxtRow("MEM", 2)
+    hdd = InfoTxtRow("HDD", 3)
 
-hdd.warn()
-gpu.warn()
+    cpu.write_cell_1(InfoTxtCell(100, "C"))
+    cpu.write_cell_2(InfoTxtCell(100, "%"))
 
-cpu.render()
-gpu.render()
-mem.render()
-hdd.render()
-display.show()
+    gpu.write_cell_1(InfoTxtCell(1, "C"))
+    gpu.write_cell_2(InfoTxtCell(98, "%"))
+
+    mem.write_cell_1(InfoTxtCell(6, "C"))
+    mem.write_cell_2(InfoTxtCell(1000, "%"))
+
+    hdd.write_cell_1(InfoTxtCell(1000, "MB/s", 8))
+
+    hdd.warn()
+    gpu.warn()
+
+    cpu.render()
+    gpu.render()
+    mem.render()
+    hdd.render()
+    display.show()
 
 
 def info():
@@ -185,3 +205,30 @@ def test_demo():
     display.text(":)", 40, 24, 1)
     display.show()
     print("END")
+
+
+test()
+"""
+import machine
+import time
+
+print("FUCKAA")
+# Define USB VID and PID of the device
+USB_VID = 0x1234  # Replace with your device's vendor ID
+USB_PID = 0x5678  # Replace with your device's product ID
+
+# Tim: we need to wait for https://github.com/micropython/micropython/pull/9497
+
+# Initialize USB serial communication
+usb = machine.USB_VCP()
+
+while True:
+    # Check if any data is available to read
+    if usb.any():
+        # Read the data
+        data = usb.read(64)  # Read up to 64 bytes
+        print("Received data:", data)
+
+    # Add a small delay to avoid busy-waiting
+    time.sleep(0.1)
+"""
