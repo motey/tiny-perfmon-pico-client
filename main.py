@@ -1,5 +1,5 @@
-from machine import Pin, I2C
-from typing import Literal, Optional
+from machine import Pin, I2C, Timer
+from typing import Literal, Optional, Tuple
 import time
 
 import ssd1306
@@ -185,3 +185,145 @@ def test_demo():
     display.text(":)", 40, 24, 1)
     display.show()
     print("END")
+
+    #############
+    ###Motor
+
+
+from time import sleep
+from utime import sleep_ms
+
+HIGH = True
+LOW = False
+
+
+class DRV8825Mode:
+    def __init__(
+        self,
+        mode_setting: Tuple[bool, bool, bool],
+        microsteps: Literal[1, 2, 4, 8, 16, 32],
+    ):
+        self.mode_setting = mode_setting
+        self.microsteps = microsteps
+
+
+class DRV8825Modes:
+    FULL = DRV8825Mode((LOW, LOW, LOW), 1)
+    HALF = DRV8825Mode((HIGH, LOW, LOW), 2)
+    QUARTER = DRV8825Mode((LOW, HIGH, LOW), 4)
+    ONE_8 = DRV8825Mode((HIGH, HIGH, LOW), 8)
+    ONE_16 = DRV8825Mode((LOW, LOW, HIGH), 16)
+    ONE_32 = DRV8825Mode((HIGH, LOW, HIGH), 32)
+
+
+class DRV8825StepperMotor:
+    # https://www.studiopieters.nl/drv8825-pinout/
+
+    def __init__(
+        self,
+        step_pin: Pin,
+        direction_pin: Pin,
+        reset_pin: Pin,
+        sleep_pin: Pin,
+        enable_pin: Pin,
+        mode_pins: Tuple[Pin, Pin, Pin],
+        # fault_pin: Pin,
+        mode: DRV8825Mode = DRV8825Modes.FULL,
+    ):
+        self.step_pin = step_pin
+        self.direction_pin = direction_pin
+        self.reset_pin = reset_pin
+        self.sleep_pin = sleep_pin
+        self.enable_pin = enable_pin
+        self.mode_pins = mode_pins
+        # self.fault_pin = fault_pin
+        self.mode = mode
+        self.delay: float = 0.0
+        self._init_motor()
+
+    def _init_motor(self):
+        self.enable()
+        self.reset(False)
+        self.sleep(False)
+        self.set_mode(self.mode)
+
+    def set_mode(self, mode: DRV8825Mode):
+        """All modes are defined in DRV8825Resolution
+
+        Args:
+            res (Tuple[bool, bool, bool]): _description_
+        """
+        self.delay = 0.005 / mode.microsteps
+        for index, pin in enumerate(self.mode_pins):
+            pin.value(mode.mode_setting[index])
+        self.mode = mode
+
+    def enable(self, enable: bool = True):
+        """Enable or disable the driver"""
+        # from https://lastminuteengineers.com/drv8825-stepper-motor-driver-arduino-tutorial/
+        """EN is an active low input pin.
+        When this pin is pulled LOW, the DRV8825 driver is enabled.
+        By default, this pin is pulled low, so unless you pull it high,
+        the driver is always enabled.
+        This pin is particularly useful when implementing an emergency stop or shutdown system.
+        """
+        self.enable_pin.value(not enable)
+
+    def sleep(self, sleep_: bool = True):
+        """Set the driver in "sleep"-mode (or disable sleep mode)"""
+        # from https://lastminuteengineers.com/drv8825-stepper-motor-driver-arduino-tutorial/
+        """SLP is an active low input pin.
+        Pulling this pin LOW puts the driver into sleep mode,
+        reducing power consumption to a minimum.
+        You can use this to save power, especially when the motor is not in use."""
+        self.sleep_pin.value(not sleep_)
+
+    def reset(self, reset: bool = False):
+        """Activate or disable reset mode"""
+        # from https://lastminuteengineers.com/drv8825-stepper-motor-driver-arduino-tutorial/
+        """RST is an active low input as well. 
+        When this pin is pulled LOW, all STEP inputs are ignored. 
+        It also resets the driver by setting the internal translator to a predefined “home” state. 
+        Home state is basically the initial position from which the motor starts, 
+        and it varies based on microstep resolution.
+        """
+        self.reset_pin.value(not reset)
+
+    def move(self, steps: int = 1, clockwise: bool = False):
+        self.direction_pin.value(clockwise)
+        # self.delay = 0.001
+        self.debug_print()
+        for i in range(steps * 2):
+            self.step_pin.value(not self.step_pin.value())
+            sleep(self.delay)
+            print("self.step_pin.value", self.step_pin.value())
+
+    def debug_print(self):
+        mode_pin_values = []
+        for mp in self.mode_pins:
+            mode_pin_values.append(mp.value())
+        output = f"step_pin = {self.step_pin.value()}\n"
+        output += f"direction_pin = {self.direction_pin.value()}\n"
+        output += f"reset_pin = {self.reset_pin.value()}\n"
+        output += f"sleep_pin = {self.sleep_pin.value()}\n"
+        output += f"enable_pin = {self.enable_pin.value()}\n"
+        output += f"mode_pins = {mode_pin_values}\n"
+        output += f"mode_microsteps = {self.mode.microsteps}\n"
+        output += f"delay = {self.delay}"
+
+        print(output)
+
+
+m = DRV8825StepperMotor(
+    step_pin=Pin(4, Pin.OUT),
+    direction_pin=Pin(5, Pin.OUT),
+    reset_pin=Pin(2, Pin.OUT),
+    sleep_pin=Pin(3, Pin.OUT),
+    enable_pin=Pin(6, Pin.OUT),
+    mode_pins=(Pin(7, Pin.OUT), Pin(8, Pin.OUT), Pin(9, Pin.OUT)),
+    mode=DRV8825Modes.FULL,
+)
+
+# m.enable()
+m.move(200, True)
+m.sleep()

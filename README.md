@@ -18,7 +18,7 @@ drag and drop file onto pico.
 
 ### ssd1306 - mini oled screen lib
 
-mpremote a1 mip install ssd1306
+`mpremote a1 mip install ssd1306`
 ### typing support
 
 https://micropython-stubs.readthedocs.io/en/stable/_typing_mpy.html
@@ -29,6 +29,8 @@ https://micropython-stubs.readthedocs.io/en/stable/_typing_mpy.html
 
 pip install git+https://github.com/stlehmann/micropython-ssd1306
 
-### local code completion foir external libs
+### local code completion for external libs
+
+pip install -U  micropython-rp2-pico-stubs
 
 ./download_libs_for_codecompletion.sh
