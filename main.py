@@ -1,7 +1,7 @@
 from machine import Pin, I2C, Timer
-from typing import Literal, Optional, Tuple
+from typing import Literal, Optional, Tuple, Callable, Awaitable
 import time
-
+import uasyncio as asyncio
 import ssd1306
 
 # using default address 0x3C
@@ -229,6 +229,7 @@ class DRV8825StepperMotor:
         mode_pins: Tuple[Pin, Pin, Pin],
         # fault_pin: Pin,
         mode: DRV8825Mode = DRV8825Modes.FULL,
+        full_rotation_full_steps: int = 200,
     ):
         self.step_pin = step_pin
         self.direction_pin = direction_pin
@@ -237,8 +238,11 @@ class DRV8825StepperMotor:
         self.enable_pin = enable_pin
         self.mode_pins = mode_pins
         # self.fault_pin = fault_pin
+        self.full_rotation_full_steps = full_rotation_full_steps
         self.mode = mode
+
         self.delay: float = 0.0
+
         self._init_motor()
 
     def _init_motor(self):
@@ -289,14 +293,47 @@ class DRV8825StepperMotor:
         """
         self.reset_pin.value(not reset)
 
-    def move(self, steps: int = 1, clockwise: bool = False):
+    def step(self, steps: int = 1, clockwise: bool = False):
         self.direction_pin.value(clockwise)
         # self.delay = 0.001
         self.debug_print()
         for i in range(steps * 2):
-            self.step_pin.value(not self.step_pin.value())
             sleep(self.delay)
-            print("self.step_pin.value", self.step_pin.value())
+            self.step_pin.value(not self.step_pin.value())
+
+    def rotate(self, rotations: float = 1.0, clockwise: bool = False):
+        self.step(
+            steps=int(
+                float(self.mode.microsteps * self.full_rotation_full_steps) * rotations
+            ),
+            clockwise=clockwise,
+        )
+
+    def rotate_while(self, while_callback: Callable[[], bool], clockwise: bool = False):
+        self.direction_pin.value(clockwise)
+        while while_callback():
+            self.step(1, clockwise)
+
+    async def async_step(self, steps: int = 1, clockwise: bool = False):
+        self.direction_pin.value(clockwise)
+        for i in range(steps * 2):
+            await asyncio.sleep(self.delay)
+            self.step_pin.value(not self.step_pin.value())
+
+    async def async_rotate(self, rotations: float = 1.0, clockwise: bool = False):
+        await self.async_step(
+            steps=int(
+                float(self.mode.microsteps * self.full_rotation_full_steps) * rotations
+            ),
+            clockwise=clockwise,
+        )
+
+    async def async_rotate_while(
+        self, while_callback: Callable[[], Awaitable[bool]], clockwise: bool = False
+    ):
+        self.direction_pin.value(clockwise)
+        while await while_callback():
+            self.step(1, clockwise)
 
     def debug_print(self):
         mode_pin_values = []
@@ -321,9 +358,10 @@ m = DRV8825StepperMotor(
     sleep_pin=Pin(3, Pin.OUT),
     enable_pin=Pin(6, Pin.OUT),
     mode_pins=(Pin(7, Pin.OUT), Pin(8, Pin.OUT), Pin(9, Pin.OUT)),
-    mode=DRV8825Modes.FULL,
+    mode=DRV8825Modes.ONE_8,
 )
 
-# m.enable()
-m.move(200, True)
+
+m.enable()
+m.rotate(2, True)
 m.sleep()
