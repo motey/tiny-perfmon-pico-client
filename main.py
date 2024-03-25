@@ -1,7 +1,7 @@
-from machine import Pin, I2C, Timer
+from machine import Pin, I2C
 from typing import Literal, Optional, Tuple, Callable, Awaitable
 import utime
-import uasyncio as asyncio
+import uasyncio
 import ssd1306
 import math
 
@@ -191,38 +191,107 @@ def test_demo():
     ###Motor
 
 
-from typing import Tuple, Literal, Callable, Awaitable, Optional
-from machine import Pin
+from typing import Tuple, Literal, Callable, Awaitable, Optional, Dict, Any
+from machine import Pin, Timer
 from utime import sleep_us
 import uasyncio
-
-HIGH = True
-LOW = False
-
-
-class DRV8825SteppingMode:
-    def __init__(
-        self,
-        name: str,
-        mode_setting: Tuple[bool, bool, bool],
-        microsteps: Literal[1, 2, 4, 8, 16, 32],
-    ):
-        self.name = name
-        self.mode_setting = mode_setting
-        self.microsteps = microsteps
-
-
-class DRV8825Modes:
-    FULL = DRV8825SteppingMode("FULL", (LOW, LOW, LOW), 1)
-    HALF = DRV8825SteppingMode("HALF", (HIGH, LOW, LOW), 2)
-    QUARTER = DRV8825SteppingMode("QUARTER", (LOW, HIGH, LOW), 4)
-    ONE_8 = DRV8825SteppingMode("1/8", (HIGH, HIGH, LOW), 8)
-    ONE_16 = DRV8825SteppingMode("1/16", (LOW, LOW, HIGH), 16)
-    ONE_32 = DRV8825SteppingMode("1/32", (HIGH, LOW, HIGH), 32)
 
 
 class DRV8825StepperMotor:
     # https://www.studiopieters.nl/drv8825-pinout/
+    HIGH = True
+    LOW = False
+
+    class DRV8825SteppingMode:
+        def __init__(
+            self,
+            name: str,
+            mode_setting: Tuple[bool, bool, bool],
+            microsteps: Literal[1, 2, 4, 8, 16, 32],
+        ):
+            self.name = name
+            self.mode_setting = mode_setting
+            self.microsteps = microsteps
+
+    MODE_FULL = DRV8825SteppingMode("FULL", (LOW, LOW, LOW), 1)
+    MODE_HALF = DRV8825SteppingMode("HALF", (HIGH, LOW, LOW), 2)
+    MODE_QUARTER = DRV8825SteppingMode("QUARTER", (LOW, HIGH, LOW), 4)
+    MODE_ONE_8 = DRV8825SteppingMode("1/8", (HIGH, HIGH, LOW), 8)
+    MODE_ONE_16 = DRV8825SteppingMode("1/16", (LOW, LOW, HIGH), 16)
+    MODE_ONE_32 = DRV8825SteppingMode("1/32", (HIGH, LOW, HIGH), 32)
+
+    class NonBlockResult:
+        def __init__(self):
+            self.done = False
+            self.pulses_done: int = 0
+            self._start_tick_ms: Optional[float] = None
+            self._finish_tick_ms: Optional[float] = None
+            self.callback_result: Any = None
+
+        def get_run_time_ms(self) -> float:
+            if self._start_tick_ms is None:
+                raise ValueError("Non blocking function not yet started.")
+            if self._finish_tick_ms is None:
+                return utime.ticks_diff(utime.ticks_ms(), self._start_tick_ms)
+            return utime.ticks_diff(self._finish_tick_ms, self._start_tick_ms)
+
+        def get_steps_done(self) -> float:
+            return self.pulses_done / 2
+
+    class NonBlockTimerContainer:
+
+        def __init__(
+            self,
+            timer: Timer,
+            target_steps: Optional[int] = None,
+            keep_running_check_callback: Optional[Callable[[], bool]] = None,
+            finished_callback: Optional[
+                Optional[
+                    Callable[
+                        ["DRV8825StepperMotor.NonBlockResult"],
+                        "DRV8825StepperMotor.NonBlockResult",
+                    ]
+                ]
+            ] = None,
+        ):
+            if target_steps and keep_running_check_callback:
+                raise ValueError(
+                    f"Either set 'target_steps' or 'keep_running_check_callback', not both."
+                )
+            elif not target_steps and not keep_running_check_callback:
+                raise ValueError(
+                    f"Either set 'target_steps' or 'keep_running_check_callback'."
+                )
+            self.timer = timer
+            self.steps_remaining = target_steps
+            self.keep_running_check_callback = keep_running_check_callback
+            self.finished_callback = finished_callback
+            self.result = DRV8825StepperMotor.NonBlockResult()
+
+        def make_pulse(self) -> bool:
+            if self.result._start_tick_ms is None:
+                self.result._start_tick_ms = utime.ticks_ms()
+            result = False
+
+            if self.keep_running_check_callback is not None:
+                result = self.keep_running_check_callback()
+            elif self.steps_remaining == 0:
+                result = False
+            elif self.steps_remaining:
+                self.steps_remaining = self.steps_remaining - 1
+                result = True
+            if result:
+                self.result.pulses_done = self.result.pulses_done + 1
+            # just to make the linter happy.
+            return result
+
+        def finish(self) -> "DRV8825StepperMotor.NonBlockResult":
+            self.timer.deinit()
+            self.result._finish_tick_ms = utime.ticks_ms()
+            self.result.done = True
+            if self.finished_callback:
+                self.result.callback_result = self.finished_callback(self.result)
+            return self.result
 
     def __init__(
         self,
@@ -233,7 +302,7 @@ class DRV8825StepperMotor:
         enable_pin: Optional[Pin] = None,
         mode_pins: Optional[Tuple[Pin, Pin, Pin]] = None,
         fault_pin: Optional[Pin] = None,
-        mode: DRV8825SteppingMode = DRV8825Modes.FULL,
+        mode: DRV8825SteppingMode = MODE_FULL,
         full_steps_for_one_revolution: int = 200,
         target_time_for_one_revolution_ms: float = 500,
         skip_motor_init: bool = False,
@@ -266,8 +335,12 @@ class DRV8825StepperMotor:
 
         self.pulse_delay_us: float = 0.0
         self.steps_for_one_revolution = 0
+
         if not skip_motor_init:
             self._init_motor()
+        self._timer_container: Optional[DRV8825StepperMotor.NonBlockTimerContainer] = (
+            None
+        )
 
     def _init_motor(self):
         if self.enable_pin:
@@ -292,12 +365,13 @@ class DRV8825StepperMotor:
         delay_ms = self.target_time_for_one_revolution_ms / int(
             self.steps_for_one_revolution * 2
         )
+        self.pulse_delay_us = int(delay_ms * 1000)
 
-        ## the pulse delay offset value is not based on anything. it just works ¯\_(ツ)_/¯.
+        ## the pulse delay offset value is not based on anything. it just works in blocking functions ¯\_(ツ)_/¯
         ## The resulting time for one revolution is in all my test cases closer to self.target_time_for_one_revolution_ms as without
-        ## (ToDo: find explanation)
-        pulse_delay_offset = self.mode.microsteps
-        self.pulse_delay_us = int(delay_ms * 1000) - pulse_delay_offset
+        # it is not used in non blocking (incl. asynco) functions
+        ## (ToDo: find explanation and document)
+        self.pulse_delay_offset_blocking_step = -self.mode.microsteps
 
         # Set the microstepping on the DRV8825 driver
         if self.mode_pins and len(self.mode_pins) == 3:
@@ -305,7 +379,7 @@ class DRV8825StepperMotor:
                 pin.value(mode.mode_setting[index])
         else:
             print(
-                f"Warning: Microstepping mode set to {mode.name}, but mode pin (M0,M1,M3) were not provided. Make sure mode pins are set otherwise."
+                f"Warning: Microstepping mode set to {mode.name}, but mode pins (M0,M1,M3) were not provided. Make sure mode pins are set otherwise/externaly."
             )
         self.mode = mode
 
@@ -372,34 +446,157 @@ class DRV8825StepperMotor:
                 "Can not switch DIR pin. Pin was not provided on instantiation of `DRV8825StepperMotor`."
             )
 
-    def step(self, steps: int = 1, clockwise: Optional[bool] = None):
-        """Turn the motor one step
+    def is_direction_clockwise(self) -> bool:
+        """Check current set roatation direction of motor
+
+        Raises:
+            ValueError: Fails if DIR pin is not provided
+
+        Returns:
+            bool: _description_
+        """
+        if self.direction_pin:
+            return bool(self.direction_pin.value())
+        else:
+            raise ValueError(
+                "Can determine direction. DIR pin was not provided on instantiation of `DRV8825StepperMotor`."
+            )
+
+    def step(self):
+        """Create a single pulse on the STP pin. A.k.a make one step."""
+        self.step_pin.toggle()
+
+    def steps(self, amount: int = 1, clockwise: Optional[bool] = None):
+        """Turn the motor one step. This is the most simple method but also a blocking one.
+        It is easy to understand but comes with some caveats:
+            * The speed can vary based the work load of the microcontroller.
+            * You can not do anything else until the motor movement is finished.
+        If you need a non blocking way have a look at DRV8825StepperMotor.steps_non_blocking() and/or DRV8825StepperMotor.steps_async()
 
         Args:
-            steps (int, optional): _description_. Defaults to 1.
+            amount (int, optional): _description_. Defaults to 1.
             clockwise (bool, optional): _description_. Defaults to None.
         """
         if clockwise:
             self.direction_clockwise(clockwise)
-        for i in range(steps * 2):
-            sleep_us(self.pulse_delay_us)
-            self.step_pin.value(not self.step_pin.value())
+        for i in range(amount * 2):
+            sleep_us(self.pulse_delay_us + self.pulse_delay_offset_blocking_step)
+            self.step()
 
-    def rotate(self, revolutions: float = 1.0, clockwise: Optional[bool] = None):
+    def rotate(
+        self,
+        revolutions: float = 1.0,
+        clockwise: Optional[bool] = None,
+    ):
         """Turn the motor X revolutions (One revolution -> 360°). Can be a float to turn fractional revolution (1.5 will make one and a half revolution)
+        This is a blocking function, see DRV8825StepperMotor.steps() to be aware of the caveats.
 
         Args:
-            rotations (float, optional): _description_. Defaults to 1.0.
+            revolutions (float, optional): _description_. Defaults to 1.0.
             clockwise (bool, optional): _description_. Defaults to False.
         """
-        self.step(
-            steps=int(self.steps_for_one_revolution * revolutions),
+        step_count = int(self.steps_for_one_revolution * revolutions)
+        self.steps(
+            amount=step_count,
             clockwise=clockwise,
         )
 
     def rotate_while(
         self, while_check_func: Callable[[], bool], clockwise: Optional[bool] = None
     ):
+        """Provide a function that returns a boolean. The motor will rotate until the function returns False.
+        Args:
+            while_check_func (Callable[[], bool]): _description_
+            clockwise (bool, optional): _description_. Defaults to None.
+        """
+        if clockwise:
+            self.direction_clockwise(clockwise)
+        while while_check_func():
+            self.steps(1)
+
+    def _step_non_blocking_timer_callback(self, t: Timer):
+        if self._timer_container:
+            if self._timer_container.make_pulse():
+                self.step()
+            else:
+                self._timer_container.finish()
+
+    def _steps_non_blocking(
+        self, timer_container: NonBlockTimerContainer, clockwise: Optional[bool] = None
+    ):
+        if clockwise:
+            self.direction_clockwise(clockwise)
+
+        self._timer_container = timer_container
+        # Micropython Timers frequencies are defined in hertz(hz). Lets first calculate our delay into Hz.
+        frequency_hz: int = int((1 / (self.pulse_delay_us / 1000 / 1000)))
+
+        self._timer_container.timer.init(
+            freq=frequency_hz,
+            mode=Timer.PERIODIC,
+            callback=self._step_non_blocking_timer_callback,
+        )
+        return self._timer_container.result
+
+    def steps_non_blocking(
+        self,
+        amount: int = 1,
+        clockwise: Optional[bool] = None,
+        callback: Optional[Callable[[NonBlockResult], Any]] = None,
+        timer_id: int = -1,
+    ) -> NonBlockResult:
+        """Do x steps. Same as DRV8825StepperMotor.steps(), but non blocking.
+        This means you can call this function and the code will continue and not wait for the motor move to be finished.
+        The non blocking behaviour is achieved by using a Machine.Timer().
+
+        Args:
+            steps (int, optional): _description_. Defaults to 1.
+            clockwise (Optional[bool], optional): _description_. Defaults to None.
+            callback (Optional[Callable], optional): _description_. Defaults to None.
+            timer_id (int, optional): _description_. Defaults to -1.
+        """
+        non_block_timer_container = DRV8825StepperMotor.NonBlockTimerContainer(
+            timer=Timer(timer_id),
+            target_steps=amount * 2,
+            finished_callback=callback,
+        )
+        return self._steps_non_blocking(
+            timer_container=non_block_timer_container,
+            clockwise=clockwise,
+        )
+
+    def rotate_non_blocking(
+        self,
+        revolutions: float = 1.0,
+        clockwise: Optional[bool] = None,
+        callback: Optional[Callable[[NonBlockResult], Any]] = None,
+        timer_id: int = -1,
+    ) -> NonBlockResult:
+        """Do x revolutions. Same as DRV8825StepperMotor.rotate(), but non blocking.
+        This means you can call this function and the code will continue and not wait for the motor move to be finished.
+        The non blocking behaviour is achieved by using a Machine.Timer().
+
+        Args:
+            revolutions (float, optional): _description_. Defaults to 1.0.
+            clockwise (Optional[bool], optional): _description_. Defaults to None.
+            callback (Optional[Callable], optional): _description_. Defaults to None.
+            timer_id (int, optional): _description_. Defaults to -1.
+        """
+        step_count = int(self.steps_for_one_revolution * revolutions)
+        return self.steps_non_blocking(
+            amount=step_count,
+            clockwise=clockwise,
+            timer_id=timer_id,
+            callback=callback,
+        )
+
+    def rotate_while_non_blocking(
+        self,
+        while_check_func: Callable[[], bool],
+        clockwise: Optional[bool] = None,
+        callback: Optional[Callable[[NonBlockResult], Any]] = None,
+        timer_id: int = -1,
+    ) -> NonBlockResult:
         """Provide a function that returns a boolean. The motor will rotate until the function returns False.
         example:
         ```python
@@ -413,56 +610,59 @@ class DRV8825StepperMotor:
         """
         if clockwise:
             self.direction_clockwise(clockwise)
-        while while_check_func():
-            self.step(1, clockwise)
 
-    async def async_step(self, steps: int = 1, clockwise: Optional[bool] = None):
-        """Same as
+        return self._steps_non_blocking(
+            timer_container=DRV8825StepperMotor.NonBlockTimerContainer(
+                timer=Timer(timer_id),
+                keep_running_check_callback=while_check_func,
+                finished_callback=callback,
+            )
+        )
+
+    async def step_async(self, steps: int = 1, clockwise: Optional[bool] = None):
+        """Async (uasyncio) version of DRV8825StepperMotor.step()
+
 
         Args:
             steps (int, optional): _description_. Defaults to 1.
-            clockwise (bool, optional): _description_. Defaults to False.
+            clockwise (bool, optional): _description_. Defaults to None.
         """
         if clockwise:
             self.direction_clockwise(clockwise)
         for i in range(steps * 2):
-            await uasyncio.sleep_us(self.pulse_delay_us)
-            self.step_pin.value(not self.step_pin.value())
+            await uasyncio.sleep_ms(self.pulse_delay_us / 1000)
+            self.step()
 
-    async def async_rotate(
-        self, rotations: float = 1.0, clockwise: Optional[bool] = False
+    async def rotate_async(
+        self, revolutions: int | float = 1.0, clockwise: bool = False
     ):
-        await self.async_step(
-            steps=int(self.steps_for_one_revolution * rotations),
+        """Async (uasyncio) version of DRV8825StepperMotor.rotate()
+        Turn the motor X revolutions (One revolution -> 360°). Can be a float to turn fractional revolution (1.5 will make one and a half revolution)
+
+        Args:
+            rotations (float, optional): _description_. Defaults to 1.0.
+            clockwise (bool, optional): _description_. Defaults to False.
+        """
+        await self.step_async(
+            steps=int(self.steps_for_one_revolution * revolutions),
             clockwise=clockwise,
         )
 
-    async def async_rotate_while(
+    async def rotate_while_async(
         self,
         while_check_func: Callable[[], Awaitable[bool]],
         clockwise: Optional[bool] = None,
     ):
         """Provide a async function that returns a boolean. The motor will rotate until the function returns False.
         example:
-        ```python
-        import uasyncio
-        start_time = utime.ticks_ms()
-        async def are_3_seconds_gone() -> bool:
-            if (utime.ticks_diff(utime.ticks_ms(), start_time) / 1000) > 3:
-                return True
-            return False
-        uasyncio.run(m.async_rotate_while(are_3_seconds_gone, clockwise=False))
-        ```
         Args:
             while_check_func (Callable[[], Awaitable[bool]]): _description_
             clockwise (bool, optional): _description_. Defaults to None.
         """
         if clockwise:
             self.direction_clockwise(clockwise)
-        res = await while_check_func()
-        print("RES", res)
         while not await while_check_func():
-            self.step(1, clockwise)
+            self.steps(1, clockwise)
 
 
 m = DRV8825StepperMotor(
@@ -472,34 +672,124 @@ m = DRV8825StepperMotor(
     sleep_pin=Pin(3, Pin.OUT),
     enable_pin=Pin(6, Pin.OUT),
     mode_pins=(Pin(7, Pin.OUT), Pin(8, Pin.OUT), Pin(9, Pin.OUT)),
-    mode=DRV8825Modes.ONE_16,
-    target_time_for_one_revolution_ms=300,
+    mode=DRV8825StepperMotor.MODE_ONE_8,
+    target_time_for_one_revolution_ms=1000,
 )
-import utime
-
-"""
-start = utime.ticks_ms()
-# m.enable()
-m.rotate(1.0, False)
-end = utime.ticks_ms()
-dur = utime.ticks_diff(end, start) / 1000
-print("Duration sec:", dur)
-# m.rotate(20, False)
-m.sleep()
-"""
+button = Pin(15, Pin.IN, pull=1)
 
 
-# async example
+async def button_is_pressed():
+    return bool(not button.value())
+
+
 import uasyncio
+
+uasyncio.run(m.rotate_while_async(button_is_pressed, clockwise=True))
+"""
+m = DRV8825StepperMotor(
+    step_pin=Pin(4, Pin.OUT),
+    direction_pin=Pin(5, Pin.OUT),
+    reset_pin=Pin(2, Pin.OUT),
+    sleep_pin=Pin(3, Pin.OUT),
+    enable_pin=Pin(6, Pin.OUT),
+    mode_pins=(Pin(7, Pin.OUT), Pin(8, Pin.OUT), Pin(9, Pin.OUT)),
+    target_time_for_one_revolution_ms=1000,
+)
+m.rotate(3, clockwise=False)
+m.sleep()
+
+
+print("GO")
+m = DRV8825StepperMotor(
+    step_pin=Pin(4, Pin.OUT),
+    direction_pin=Pin(5, Pin.OUT),
+    reset_pin=Pin(2, Pin.OUT),
+    sleep_pin=Pin(3, Pin.OUT),
+    enable_pin=Pin(6, Pin.OUT),
+    mode_pins=(Pin(7, Pin.OUT), Pin(8, Pin.OUT), Pin(9, Pin.OUT)),
+    mode=DRV8825StepperMotor.MODE_ONE_32,
+    target_time_for_one_revolution_ms=2000,
+)
+# m.steps(100)
+print("TIMER")
+# m.steps_non_blocking(1000)
+from time import sleep
 
 start_time = utime.ticks_ms()
 
 
-async def three_seconds_are_gone() -> bool:
+def print_time_gone():
+    print(utime.ticks_diff(utime.ticks_ms(), start_time), "ms")
+
+
+def reset_start_time():
+    global start_time
+    start_time = utime.ticks_ms()
+
+
+m.rotate(5)
+print_time_gone()
+reset_start_time()
+m.rotate_non_blocking(5, callback=print_time_gone)
+print("Do other stuff while the motor is rotating")
+sleep(12)
+
+m.sleep()
+
+
+start_time = utime.ticks_ms()
+
+m.rotate(1, clockwise=True)
+
+
+def three_seconds_are_gone() -> bool:
     if (utime.ticks_diff(utime.ticks_ms(), start_time) / 1000) > 3:
         return True
     return False
 
 
-uasyncio.run(m.async_rotate_while(three_seconds_are_gone, clockwise=False))
+m.rotate_while(three_seconds_are_gone, clockwise=False)
 m.sleep()
+exit()
+import machine
+
+
+class Servo:
+    def __init__(
+        self, pin_id, min_us=544.0, max_us=2400.0, min_deg=0.0, max_deg=180.0, freq=50
+    ):
+        self.pwm = machine.PWM(machine.Pin(pin_id))
+        self.pwm.freq(freq)
+        self.current_us = 0.0
+        self._slope = (min_us - max_us) / (
+            math.radians(min_deg) - math.radians(max_deg)
+        )
+        self._offset = min_us
+
+    def write(self, deg):
+        self.write_rad(math.radians(deg))
+
+    def read(self):
+        return math.degrees(self.read_rad())
+
+    def write_rad(self, rad):
+        self.write_us(rad * self._slope + self._offset)
+
+    def read_rad(self):
+        return (self.current_us - self._offset) / self._slope
+
+    def write_us(self, us):
+        self.current_us = us
+        self.pwm.duty_ns(int(self.current_us * 1000.0))
+
+    def read_us(self):
+        return self.current_us
+
+    def off(self):
+        self.pwm.duty_ns(0)
+
+
+s = Servo(16)
+print("Turn")
+s.write(200)
+"""
